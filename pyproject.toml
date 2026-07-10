@@ -1,0 +1,30 @@
+[tool.poetry]
+name = "llm-chat-project"
+version = "0.1.0"
+description = "Локальный LLM-чат с экспериментами по параметрам генерации"
+authors = ["Коханчик Мария"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.10"
+ollama = "^0.4.0"
+python-telegram-bot = "^21.3"
+streamlit = "^1.31.0"
+python-dotenv = "^1.0.0"
+
+# Опционально для использования LM Studio
+openai = {version = "^1.30.0", optional = true}
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+black = "^24.0.0"
+ruff = "^0.3.0"
+mypy = "^1.8.0"
+
+[tool.poetry.extras]
+lmstudio = ["openai"]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
