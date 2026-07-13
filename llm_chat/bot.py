@@ -1,9 +1,9 @@
 """Telegram-бот для локальной LLM."""
 
-import asyncio
 import os
 from typing import Dict, Any
 
+from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -13,9 +13,8 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from dotenv import load_dotenv
 
-from .model import LLMClient, EXPERIMENT_CONFIGS
+from llm_chat.model import LLMClient, EXPERIMENT_CONFIGS
 
 load_dotenv()
 
