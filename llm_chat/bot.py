@@ -113,7 +113,8 @@ class LLMBot:
 
         self.token_tracker = TokenTracker(
             log_dir="token_logs",
-            model=self.model_name
+            model=self.model_name,
+            ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
         )
 
         # Состояние пользователей
@@ -327,15 +328,12 @@ class LLMBot:
         )
         
         try:
-            # Генерация в отдельном потоке
-            loop = asyncio.get_event_loop()
-            
             def run_experiment():
                 return self.llm_client.compare_parameters(text, EXPERIMENT_CONFIGS)
-            
+
             results = await asyncio.wait_for(
-                loop.run_in_executor(self.executor, run_experiment),
-                timeout=self.request_timeout * 3  # В 3 раза больше для эксперимента
+                asyncio.get_running_loop().run_in_executor(self.executor, run_experiment),
+                timeout=self.request_timeout * 3
             )
             
             await status_msg.delete()
@@ -381,8 +379,6 @@ class LLMBot:
         )
 
         try:
-            loop = asyncio.get_event_loop()
-
             def generate():
                 # Засекаем время
                 start = time.time()
@@ -396,7 +392,7 @@ class LLMBot:
                 return answer, elapsed
 
             answer, duration = await asyncio.wait_for(
-                loop.run_in_executor(self.executor, generate),
+                asyncio.get_running_loop().run_in_executor(self.executor, generate),
                 timeout=self.request_timeout
             )
 
@@ -500,8 +496,6 @@ class LLMBot:
         
         for prompt in test_prompts:
             try:
-                loop = asyncio.get_event_loop()
-                
                 def test_generate():
                     return self.llm_client.chat(
                         prompt=prompt,
@@ -509,9 +503,9 @@ class LLMBot:
                         top_k=1,
                         top_p=0.1,
                     )
-                
+
                 await asyncio.wait_for(
-                    loop.run_in_executor(self.executor, test_generate),
+                    asyncio.get_running_loop().run_in_executor(self.executor, test_generate),
                     timeout=30
                 )
                 logger.info(f"✅ Health check passed: '{prompt}'")
@@ -520,24 +514,49 @@ class LLMBot:
                 return False
         
         return True
-    
+
     def run(self) -> None:
         """Запустить бота."""
-        logger.info(f"Запуск бота с моделью: {self.model_name}")
-        
-        # Проверяем здоровье модели
-        loop = asyncio.get_event_loop()
-        if not loop.run_until_complete(self.health_check()):
-            logger.error("Health check не пройден! Проверьте Ollama и модель.")
-            return
-        
-        # Запускаем бота
+        # Собираем приложение с обработчиками startup/shutdown
+        self.app = (
+            Application.builder()
+                .token(self.token)
+                .post_init(self._startup_callback)
+                .post_shutdown(self._shutdown_callback)
+                .build()
+        )
+
+        # Регистрируем обработчики
+        self._register_handlers()
+
+        # Запускаем — Application сам создаст event loop
+        logger.info(f"🚀 Запуск бота с моделью: {self.model_name}")
         self.app.run_polling()
-    
-    def shutdown(self) -> None:
-        """Корректно остановить бота."""
-        logger.info("Остановка бота...")
+
+    async def _startup(self) -> None:
+        """Асинхронная инициализация перед запуском."""
+        logger.info(f"🤖 Инициализация бота с моделью: {self.model_name}")
+
+        # Проверяем здоровье модели
+        if not await self.health_check():
+            logger.error("Health check не пройден! Проверьте Ollama и модель.")
+            raise RuntimeError("Модель не отвечает")
+
+        logger.info("✅ Health check пройден успешно")
+
+    async def _shutdown(self) -> None:
+        """Асинхронная очистка при остановке."""
+        logger.info("🛑 Остановка бота...")
         self.executor.shutdown(wait=True)
+        logger.info("✅ Бот остановлен")
+
+    async def _startup_callback(self, app: Application) -> None:
+        """Callback для запуска после инициализации приложения."""
+        await self._startup()
+
+    async def _shutdown_callback(self, app: Application) -> None:
+        """Callback для остановки приложения."""
+        await self._shutdown()
 
 
 def main():
