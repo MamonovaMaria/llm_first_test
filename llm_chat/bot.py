@@ -17,6 +17,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
+from llm_chat.agent import AIAgent
 from llm_chat.model import LLMClient, EXPERIMENT_CONFIGS
 
 # Настройка логирования
@@ -84,54 +85,48 @@ class LLMBot:
         "balanced": GenerationParams(temperature=0.7, top_k=40, top_p=0.9),
         "creative": GenerationParams(temperature=1.2, top_k=60, top_p=0.95),
     }
-    
+
     def __init__(
-        self,
-        token: Optional[str] = None,
-        model_name: Optional[str] = None,
-        max_workers: int = 2,
-        request_timeout: int = 120
+            self,
+            token: Optional[str] = None,
+            model_name: Optional[str] = None,
+            max_workers: int = 2,
+            request_timeout: int = 120
     ):
-        """
-        Инициализация бота.
-        
-        Args:
-            token: Токен Telegram бота
-            model_name: Название модели в Ollama
-            max_workers: Количество потоков для параллельных запросов
-            request_timeout: Таймаут на запрос к модели (сек)
-        """
+        """Инициализация бота."""
         self.token = token or os.getenv("TELEGRAM_BOT_TOKEN")
         self.model_name = model_name or os.getenv("OLLAMA_MODEL", "qwen2.5:0.5b")
         self.request_timeout = request_timeout
-        
+
         if not self.token:
             raise ValueError("TELEGRAM_BOT_TOKEN не задан")
-        
+
         # Клиент для работы с Ollama
         self.llm_client = LLMClient(model=self.model_name)
 
+        # Трекер токенов
         self.token_tracker = TokenTracker(
             log_dir="token_logs",
             model=self.model_name,
-            ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
+        )
+
+        # Агент с памятью и чтением файлов
+        self.agent = AIAgent(
+            llm_client=self.llm_client,
+            token_tracker=self.token_tracker,
         )
 
         # Состояние пользователей
         self.user_settings: Dict[int, GenerationParams] = {}
         self.user_experiment_mode: Dict[int, bool] = {}
-        
+
         # Пул потоков для CPU-интенсивных операций
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
-        
-        # Приложение Telegram
-        self.app = Application.builder().token(self.token).build()
-        
-        # Регистрируем обработчики
-        self._register_handlers()
-        
+
+        # Приложение создаётся в run()
+        self.app = None
+
         logger.info(f"Бот инициализирован с моделью: {self.model_name}")
-    
     # ========================================================================
     # Регистрация обработчиков
     # ========================================================================
@@ -369,61 +364,26 @@ class LLMBot:
     async def _handle_regular_message(
             self, update: Update, text: str, user_id: int
     ) -> None:
-        """Обработка обычного сообщения."""
-        params = self._get_user_params(user_id)
-
-        status_msg = await update.message.reply_text(
-            f"⏳ Генерирую ответ...\n"
-            f"Модель: `{self.model_name}`\n"
-            f"Параметры: T={params.temperature}, K={params.top_k}, P={params.top_p}"
-        )
+        """Обработка обычного сообщения через агента."""
+        status_msg = await update.message.reply_text("⏳ Обрабатываю...")
 
         try:
-            def generate():
-                # Засекаем время
-                start = time.time()
-                answer = self.llm_client.chat(
-                    prompt=text,
-                    temperature=params.temperature,
-                    top_k=params.top_k,
-                    top_p=params.top_p,
-                )
-                elapsed = time.time() - start
-                return answer, elapsed
-
-            answer, duration = await asyncio.wait_for(
-                asyncio.get_running_loop().run_in_executor(self.executor, generate),
-                timeout=self.request_timeout
-            )
-
-            # === Логируем использование токенов ===
-            usage = self.token_tracker.log(
-                prompt=text,
-                response=answer,
-                duration=duration,
-                temperature=params.temperature,
-                top_k=params.top_k,
-                top_p=params.top_p,
-                user_id=user_id,
-            )
+            # Обрабатываем через агента
+            result = await self.agent.process_message(text, user_id)
 
             await status_msg.delete()
 
-            token_info = (
-                f"\n\n📊 _Запрос: {usage['prompt_tokens']} токенов | "
-                f"Ответ: {usage['response_tokens']} токенов | "
-                f"Время: {usage['duration_seconds']}с_"
-            )
+            response = result["response"]
 
-            full_response = answer + token_info
+            # Добавляем информацию о токенах если есть
+            if "token_usage" in result:
+                token_info = f"\n\n_{self.token_tracker.format_request_info(result['token_usage'])}_"
+                response += token_info
 
-            await self._send_long_message(update, full_response)
+            await self._send_long_message(update, response)
 
-        except asyncio.TimeoutError:
-            await status_msg.edit_text("⏰ Генерация заняла слишком много времени...")
         except Exception as e:
             await status_msg.edit_text(f"❌ Ошибка: {str(e)[:200]}")
-            logger.error(f"Generation error for user {user_id}: {e}")
 
     # ========================================================================
     # Вспомогательные методы

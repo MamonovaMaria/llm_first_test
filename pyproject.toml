@@ -29,3 +29,7 @@ lmstudio = ["openai"]
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+llm-bot = "llm_chat.bot:main"
+llm-console = "llm_chat.console_app:main"

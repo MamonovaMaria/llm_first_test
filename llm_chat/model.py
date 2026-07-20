@@ -85,6 +85,29 @@ class LLMClient:
 
         return results
 
+    def chat_with_history(self, messages: List[Dict[str, str]]) -> str:
+        """
+        Отправить запрос с историей диалога.
+
+        Args:
+            messages: Список сообщений [{"role": "user/assistant/system", "content": "..."}]
+
+        Returns:
+            Ответ модели
+        """
+        response = ollama.chat(
+            model=self.model,
+            messages=messages,
+            options={
+                "temperature": 0.7,
+                "top_k": 40,
+                "top_p": 0.9,
+                "num_predict": 1024,
+            }
+        )
+
+        return response["message"]["content"]
+
 
 # Предустановленные конфигурации для экспериментов
 EXPERIMENT_CONFIGS = [
