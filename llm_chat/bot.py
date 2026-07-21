@@ -523,7 +523,7 @@ def main():
     """Точка входа для poetry scripts."""
     try:
         bot = LLMBot(
-            request_timeout=int(os.getenv("REQUEST_TIMEOUT", "120"))
+            request_timeout=int(os.getenv("REQUEST_TIMEOUT", "300"))
         )
         bot.run()
     except KeyboardInterrupt:
