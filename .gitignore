@@ -1,2 +1,6 @@
 /.idea
 /.env
+/token_logs
+/tool_logs
+/llm_chat/tool_logs
+/llm_chat/token_logs
