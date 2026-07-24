@@ -2,11 +2,17 @@
 """AI-агент с памятью, чтением файлов и системным промптом."""
 
 import asyncio
+import json
 import re
 import time
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 from datetime import datetime
+
+from llm_chat.tools import (
+    ToolRegistry, FileCounter, WeatherTool,
+    WebSearchTool, DateTimeTool, CodeAnalyzer, FileReadTool
+)
 
 
 class AgentMemory:
@@ -358,18 +364,253 @@ class AIAgent:
 
         self.memory.set_system_prompt(self.DEFAULT_SYSTEM_PROMPT)
 
+        self.tool_registry = ToolRegistry()
+        self._register_tools()
+
+        # Обновлённые команды — добавляем вызовы инструментов
         self.commands = {
-            r"^(прочитай|прочитать|покажи|показать)\s+(файл|проект|директорию|папку)\s+(.+)": self._cmd_read_project,
-            r"^(read|show)\s+(file|project|directory|dir)\s+(.+)": self._cmd_read_project,
-            r"^/read\s+(.+)": self._cmd_read_project,
+            # Чтение проекта/файлов
+            r"^(прочитай|прочитать|покажи|показать)\s+(файл|проект|директорию|папку)\s*(.*)": self._cmd_read_project,
+            r"^(read|show)\s+(file|project|directory|dir)\s*(.*)": self._cmd_read_project,
+            r"^/read\s*(.*)": self._cmd_read_project,
             r"^/file\s+(.+)": self._cmd_read_file,
             r"^(прочитай файл|покажи файл|read file|show file)\s+(.+)": self._cmd_read_file,
+
+            # Инструменты
+            r"^/count\s*(\.\w+)?$": self._cmd_count_files,
+            r"^(сколько|посчитай|подсчитай)\s+(файлов|всех файлов|Python-файлов)\s*(.*)": self._cmd_count_files,
+            r"^/weather\s+(.+)": self._cmd_weather,
+            r"^(какая|какая сейчас)?\s*погода\s+(в|городе)\s+(.+)": self._cmd_weather,
+            r"^/search\s+(.+)": self._cmd_search,
+            r"^(найди|поищи|загугли)\s+(.+)": self._cmd_search,
+            r"^/time$": self._cmd_datetime,
+            r"^(который час|сколько времени|какое сегодня число|какой сегодня день)": self._cmd_datetime,
+            r"^/analyze\s+(.+)": self._cmd_analyze,
+            r"^/trace$": self._cmd_show_trace,
+
+            # Системные
             r"^/clear$": self._cmd_clear,
             r"^/system\s+(.+)": self._cmd_set_system,
             r"^/system$": self._cmd_show_system,
             r"^/memory$": self._cmd_memory_stats,
             r"^/roles$": self._cmd_list_roles,
         }
+
+    def _register_tools(self) -> None:
+        """Зарегистрировать все инструменты."""
+
+        self.tool_registry.register(FileCounter())
+        self.tool_registry.register(WeatherTool())
+        self.tool_registry.register(WebSearchTool())
+        self.tool_registry.register(DateTimeTool())
+        self.tool_registry.register(CodeAnalyzer())
+        self.tool_registry.register(FileReadTool(self.project_reader))
+
+    async def _call_tool_and_respond(
+            self, tool_name: str, tool_params: dict, user_message: str
+    ) -> Dict[str, Any]:
+        """
+        Вызвать инструмент и передать результат модели для ответа.
+
+        Обязательный вызов инструмента — модель не может ответить без него.
+        """
+        # 1. Вызываем инструмент
+        result = self.tool_registry.call(tool_name, **tool_params)
+
+        # 2. Добавляем в историю
+        self.memory.add_message("user", user_message)
+        self.memory.add_message(
+            "system",
+            f"[Вызван инструмент {tool_name}]:\n{result.format_for_llm()}"
+        )
+
+        # 3. Просим модель сформулировать ответ на основе результата
+        prompt = (
+            f"Пользователь спросил: '{user_message}'\n\n"
+            f"Был вызван инструмент '{tool_name}'. Вот его результат:\n"
+            f"{result.format_for_llm()}\n\n"
+            f"Сформулируй понятный ответ на русском языке, используя ТОЛЬКО эти данные. "
+            f"Не придумывай ничего от себя."
+        )
+
+        # 4. Отправляем модели
+        import time
+        start_time = time.time()
+
+        def generate():
+            return self.llm.chat_with_history(self.memory.get_messages())
+
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(None, generate)
+
+        duration = time.time() - start_time
+        self.memory.add_message("assistant", response)
+
+        result_dict = {
+            "response": response,
+            "type": "tool_call",
+            "duration": duration,
+            "tool_result": result.to_dict(),
+        }
+
+        if self.token_tracker:
+            usage = self.token_tracker.log(
+                prompt=prompt,
+                response=response,
+                duration=duration,
+            )
+            result_dict["token_usage"] = usage
+
+        return result_dict
+
+        # ========================================================================
+        # Обработчики команд с инструментами
+        # ========================================================================
+
+    async def _cmd_count_files(self, match: re.Match) -> Dict[str, Any]:
+        ext = None
+        user_text = match.group(0)
+
+        if ".py" in user_text or "python" in user_text.lower():
+            ext = ".py"
+
+        return await self._call_tool_direct(
+            tool_name="count_files",
+            tool_params={"path": ".", "extension": ext},
+            user_message=user_text,
+            format_response=False,  # ← без модели
+        )
+
+    async def _cmd_weather(self, match: re.Match) -> Dict[str, Any]:
+        city = match.groups()[-1].strip() if match.groups() else match.group(1).strip()
+
+        return await self._call_tool_direct(
+            tool_name="get_weather",
+            tool_params={"city": city},
+            user_message=f"погода в {city}",
+            format_response=False,  # ← без модели
+        )
+
+    async def _cmd_search(self, match: re.Match) -> Dict[str, Any]:
+        """Поиск через инструмент."""
+        query = match.group(2) if match.lastindex >= 2 else match.group(1)
+        query = query.strip()
+
+        return await self._call_tool_and_respond(
+            tool_name="web_search",
+            tool_params={"query": query},
+            user_message=f"найди {query}",
+        )
+
+    async def _cmd_datetime(self, match: re.Match) -> Dict[str, Any]:
+        return await self._call_tool_direct(
+            tool_name="datetime",
+            tool_params={},
+            user_message=match.group(0),
+            format_response=False,  # ← без модели
+        )
+
+    async def _cmd_analyze(self, match: re.Match) -> Dict[str, Any]:
+        """Анализ кода через инструмент."""
+        path = match.group(1).strip()
+
+        return await self._call_tool_and_respond(
+            tool_name="analyze_code",
+            tool_params={"filepath": path},
+            user_message=f"проанализируй {path}",
+        )
+
+    async def _cmd_show_trace(self, match: re.Match) -> Dict[str, Any]:
+        """Показать trace вызовов инструментов."""
+        trace_text = self.tool_registry.format_trace()
+        return {"response": trace_text, "type": "system"}
+
+    async def _call_tool_direct(self, tool_name: str, tool_params: dict,
+                                user_message: str, format_response: bool = True) -> Dict[str, Any]:
+        """
+        Вызвать инструмент и ответить.
+        Если format_response=False — вернуть данные как есть, без модели.
+        """
+        import time
+
+        # 1. Вызываем инструмент
+        result = self.tool_registry.call(tool_name, **tool_params)
+
+        if not result.success:
+            return {"response": f"❌ {result.error}", "type": "error"}
+
+        start_time = time.time()
+
+        if format_response:
+            # 2a. Форматируем через модель (для сложных ответов)
+            self.memory.add_message("user", user_message)
+            self.memory.add_message(
+                "system",
+                f"[Инструмент {tool_name}]:\n{result.format_for_llm()}"
+            )
+
+            prompt = (
+                f"Пользователь: '{user_message}'\n"
+                f"Результат инструмента:\n{result.format_for_llm()}\n"
+                f"Напиши краткий ответ на русском."
+            )
+
+            def generate():
+                return self.llm.chat_with_history(self.memory.get_messages())
+
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, generate)
+            self.memory.add_message("assistant", response)
+        else:
+            # 2b. Без модели — просто показываем данные
+            data = result.data
+            response = self._format_tool_result(tool_name, data)
+            duration = 0.0  # Мгновенно
+
+        duration = time.time() - start_time if format_response else 0.0
+
+        return {
+            "response": response,
+            "type": "tool_call",
+            "duration": duration,
+            "tool_result": result.to_dict(),
+        }
+
+    def _format_tool_result(self, tool_name: str, data: Dict[str, Any]) -> str:
+        """Форматировать результат инструмента без модели."""
+
+        if tool_name == "count_files":
+            total = data.get("total_files", 0)
+            by_ext = data.get("by_extension", {})
+            path = data.get("path", "")
+
+            lines = [f"📊 *Файлов в проекте ({path}): {total}*\n"]
+            lines.append("По расширениям:")
+            for ext, count in sorted(by_ext.items(), key=lambda x: -x[1]):
+                lines.append(f"  • {ext}: {count}")
+
+            if data.get("truncated"):
+                lines.append("\n⚠️ _Показаны не все файлы_")
+
+            return "\n".join(lines)
+
+        if tool_name == "datetime":
+            return (
+                f"🕐 *{data.get('date')} {data.get('time')}*\n"
+                f"📅 {data.get('day_of_week_ru')}, неделя {data.get('week_number')}"
+            )
+
+        if tool_name == "get_weather":
+            return (
+                f"🌤 *{data.get('city')}, {data.get('country')}*\n"
+                f"🌡 {data.get('temperature')}°C (ощущается как {data.get('feels_like')}°C)\n"
+                f"💧 Влажность: {data.get('humidity')}%\n"
+                f"💨 Ветер: {data.get('wind_speed')} м/с\n"
+                f"📝 {data.get('description', '')}"
+            )
+
+        # По умолчанию — JSON
+        return f"```json\n{json.dumps(data, ensure_ascii=False, indent=2)}\n```"
 
     # ========================================================================
     # Обработка сообщений
@@ -380,8 +621,10 @@ class AIAgent:
         for pattern, handler in self.commands.items():
             match = re.match(pattern, message, re.IGNORECASE)
             if match:
+                print(f"🔍 Использую инструмент {handler.__name__}")
                 return await handler(match)
 
+        print(f"🔍 Генерирую ответ с помощью модели")
         return await self._chat(message)
 
     async def _chat(self, message: str) -> Dict[str, Any]:
@@ -421,17 +664,34 @@ class AIAgent:
     # ========================================================================
 
     async def _cmd_read_project(self, match: re.Match) -> Dict[str, Any]:
-        """Обработка команды чтения проекта."""
         path = match.group(3).strip()
+        if not path:
+            path = "."
 
-        project_info = self.project_reader.read_project(path)
+        result = self.tool_registry.call("read_file", path=path)
+
+        if not result.success:
+            return {"response": f"❌ {result.error}", "type": "error"}
+
+        project_info = result.data
 
         if "error" in project_info:
             return {"response": f"❌ {project_info['error']}", "type": "error"}
 
         context = self._build_project_context(project_info)
 
-        # Авто-применение AGENTS.md
+        # === ВАЖНО: сохраняем содержимое файла в историю ===
+        if project_info.get("type") == "file" or "content" in project_info:
+            content = project_info.get("content", "")
+            file_name = project_info.get("file_name", "")
+            if isinstance(content, str) and content.strip():
+                # Добавляем содержимое как системное сообщение — модель увидит его
+                self.memory.add_message(
+                    "system",
+                    f"[Содержимое файла {file_name}]:\n```\n{content[:5000]}\n```"
+                )
+
+        # AGENTS.md
         target = self.project_reader._resolve_path(path)
         search_dir = target if target.is_dir() else target.parent
         instructions = self.project_reader.get_agent_instructions(search_dir)
@@ -445,13 +705,13 @@ class AIAgent:
             self.memory.set_system_prompt(combined)
             context += "\n\n📋 *Найдены инструкции для агента (применены как системный промпт)*"
 
-        self.memory.add_message("user", f"[Прочитан проект: {path}]")
+        self.memory.add_message("user", f"[Прочитан: {path}]")
         self.memory.add_message("assistant", context)
 
         return {
             "response": context,
-            "type": "project_read",
-            "project_info": project_info,
+            "type": "tool_call",
+            "tool_result": result.to_dict(),
         }
 
     async def _cmd_read_file(self, match: re.Match) -> Dict[str, Any]:
