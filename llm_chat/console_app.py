@@ -62,12 +62,12 @@ class ConsoleApp:
     def _print_banner(self) -> None:
         """Вывести приветственный баннер."""
         print()
-        self._print("╔══════════════════════════════════════════════╗", "info")
+        self._print("╔═════════════════════════════════════════════╗", "info")
         self._print("║         🤖 Локальный AI-агент               ║", "bold")
-        self._print("╠══════════════════════════════════════════════╣", "info")
+        self._print("╠═════════════════════════════════════════════╣", "info")
         self._print(f"║ Модель: {self.model_name:<36s}║", "info")
         self._print(f"║ Проект: {str(self.project_path)[:36]:<36s}║", "info")
-        self._print("╠══════════════════════════════════════════════╣", "info")
+        self._print("╠═════════════════════════════════════════════╣", "info")
         self._print("║ Команды:                                    ║", "info")
         self._print("║ /read <путь>   - прочитать файл/проект      ║", "info")
         self._print("║ /file <путь>   - прочитать файл             ║", "info")
@@ -75,9 +75,10 @@ class ConsoleApp:
         self._print("║ /memory        - статистика памяти          ║", "info")
         self._print("║ /system <текст>- задать системный промпт    ║", "info")
         self._print("║ /stats         - статистика токенов         ║", "info")
+        self._print("║ /trace         - история инструментов       ║", "info")
         self._print("║ /help          - помощь                     ║", "info")
         self._print("║ /exit          - выход                      ║", "info")
-        self._print("╚══════════════════════════════════════════════╝", "info")
+        self._print("╚═════════════════════════════════════════════╝", "info")
         print()
 
     def _print_help(self) -> None:

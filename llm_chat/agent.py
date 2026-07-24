@@ -11,7 +11,7 @@ from datetime import datetime
 
 from llm_chat.tools import (
     ToolRegistry, FileCounter, WeatherTool,
-    WebSearchTool, DateTimeTool, CodeAnalyzer, FileReadTool
+    WebSearchTool, DateTimeTool, CodeAnalyzer, FileReadTool, GitHubTrendingTool
 )
 
 
@@ -380,13 +380,15 @@ class AIAgent:
             r"^/count\s*(\.\w+)?$": self._cmd_count_files,
             r"^(сколько|посчитай|подсчитай)\s+(файлов|всех файлов|Python-файлов)\s*(.*)": self._cmd_count_files,
             r"^/weather\s+(.+)": self._cmd_weather,
-            r"^(какая|какая сейчас)?\s*погода\s+(в|городе)\s+(.+)": self._cmd_weather,
+            r"(?:какая\s+)?(?:сейчас\s+)?погода\s+(?:в\s+)?(?:городе\s+)?([^,.;!?]+)": self._cmd_weather,
             r"^/search\s+(.+)": self._cmd_search,
-            r"^(найди|поищи|загугли)\s+(.+)": self._cmd_search,
+            r"^(поиск)\s+(.+)": self._cmd_search,
             r"^/time$": self._cmd_datetime,
             r"^(который час|сколько времени|какое сегодня число|какой сегодня день)": self._cmd_datetime,
             r"^/analyze\s+(.+)": self._cmd_analyze,
             r"^/trace$": self._cmd_show_trace,
+            r"^(тренды|тренды github|github тренды|популярные репо)\s*(.*)": self._cmd_trending,
+
 
             # Системные
             r"^/clear$": self._cmd_clear,
@@ -405,6 +407,7 @@ class AIAgent:
         self.tool_registry.register(DateTimeTool())
         self.tool_registry.register(CodeAnalyzer())
         self.tool_registry.register(FileReadTool(self.project_reader))
+        self.tool_registry.register(GitHubTrendingTool())
 
     async def _call_tool_and_respond(
             self, tool_name: str, tool_params: dict, user_message: str
@@ -493,13 +496,38 @@ class AIAgent:
 
     async def _cmd_search(self, match: re.Match) -> Dict[str, Any]:
         """Поиск через инструмент."""
-        query = match.group(2) if match.lastindex >= 2 else match.group(1)
-        query = query.strip()
+        query = match.group(2).strip() if match.lastindex >= 2 else match.group(1).strip()
 
-        return await self._call_tool_and_respond(
+        return await self._call_tool_direct(
             tool_name="web_search",
             tool_params={"query": query},
-            user_message=f"найди {query}",
+            user_message=f"поиск: {query}",
+            format_response=False,  # ← без модели!
+        )
+
+    async def _cmd_trending(self, match: re.Match) -> Dict[str, Any]:
+        """Показать тренды GitHub."""
+        groups = match.groups()
+
+        # Определяем язык
+        language = ""
+        for g in groups:
+            if g and g in ("python", "javascript", "go", "rust", "java"):
+                language = g
+                break
+
+        # Определяем период
+        period = "daily"
+        for g in groups:
+            if g and g in ("за неделю", "weekly"):
+                period = "weekly"
+                break
+
+        return await self._call_tool_direct(
+            tool_name="github_trending",
+            tool_params={"language": language, "period": period},
+            user_message=f"тренды GitHub: {language or 'все языки'}",
+            format_response=False,
         )
 
     async def _cmd_datetime(self, match: re.Match) -> Dict[str, Any]:
@@ -608,6 +636,62 @@ class AIAgent:
                 f"💨 Ветер: {data.get('wind_speed')} м/с\n"
                 f"📝 {data.get('description', '')}"
             )
+        if tool_name == "web_search":
+            query = data.get("query", "")
+            results = data.get("results", [])
+
+            if not results:
+                return f"🔍 *{query}* — ничего не найдено."
+
+            lines = [f"🔍 *{query}*\n"]
+            for i, r in enumerate(results, 1):
+                lines.append(f"{i}. **{r['title']}**")
+                lines.append(f"   {r['snippet'][:250]}")
+                lines.append(f"   {r['url']}\n")
+
+            return "\n".join(lines)
+        if tool_name == "github_trending":
+            language = data.get("language", "все языки")
+            period = data.get("period", "день")
+            repos = data.get("repos", [])
+            url = data.get("url", "")
+
+            period_text = "за день" if period in ("день", "daily") else "за неделю"
+            lang_text = f" ({language})" if language != "все языки" else ""
+
+            if not repos:
+                return f"🔥 *GitHub Тренды{lang_text} {period_text}*\nНе удалось загрузить.\n🔗 {url}"
+
+            lines = [f"🔥 *GitHub Тренды{lang_text} {period_text}*\n"]
+
+            for i, repo in enumerate(repos, 1):
+                # Звёзды
+                stars_parts = []
+                if repo.get("total_stars"):
+                    stars_parts.append(f"⭐ {repo['total_stars']}")
+                if repo.get("stars_today"):
+                    stars_parts.append(f"📈 +{repo['stars_today']} сегодня")
+                stars_str = " | ".join(stars_parts)
+
+                # Язык
+                lang_str = f" [{repo['language']}]" if repo.get("language") else ""
+
+                lines.append(f"{i}. **{repo['name']}**{lang_str}")
+
+                if stars_str:
+                    lines.append(f"   {stars_str}")
+
+                if repo.get("description"):
+                    desc = repo["description"][:200]
+                    lines.append(f"   📝 {desc}")
+
+                lines.append(f"   🔗 {repo['url']}")
+                lines.append("")
+
+            if url:
+                lines.append(f"🔗 [Открыть GitHub Trending]({url})")
+
+            return "\n".join(lines)
 
         # По умолчанию — JSON
         return f"```json\n{json.dumps(data, ensure_ascii=False, indent=2)}\n```"
